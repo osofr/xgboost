@@ -181,6 +181,26 @@ public class Booster implements Serializable, KryoSerializable {
   }
 
   /**
+   * evaluate with given dmatrixs.
+   *
+   * @param evalMatrixs dmatrixs for evaluation
+   * @param evalNames   name for eval dmatrixs, used for check results
+   * @param iter        current eval iteration
+   * @param metricsOut  output array containing the evaluation metrics for each evalMatrix
+   * @return eval information
+   * @throws XGBoostError native error
+   */
+  public String evalSet(DMatrix[] evalMatrixs, String[] evalNames, int iter, float[] metricsOut)
+          throws XGBoostError {
+    String stringFormat = evalSet(evalMatrixs, evalNames, iter);
+    String[] metricPairs = stringFormat.split("\t");
+    for (int i = 1; i < metricPairs.length; i++) {
+      metricsOut[i - 1] = Float.valueOf(metricPairs[i].split(":")[1]);
+    }
+    return stringFormat;
+  }
+
+  /**
    * evaluate with given customized Evaluation class
    *
    * @param evalMatrixs evaluation matrix
@@ -313,6 +333,11 @@ public class Booster implements Serializable, KryoSerializable {
    * @throws XGBoostError native error
    */
   public String[] getModelDump(String featureMap, boolean withStats) throws XGBoostError {
+    return getModelDump(featureMap, withStats, "text");
+  }
+
+  public String[] getModelDump(String featureMap, boolean withStats, String format)
+         throws XGBoostError {
     int statsFlag = 0;
     if (featureMap == null) {
       featureMap = "";
@@ -320,9 +345,12 @@ public class Booster implements Serializable, KryoSerializable {
     if (withStats) {
       statsFlag = 1;
     }
+    if (format == null) {
+      format = "text";
+    }
     String[][] modelInfos = new String[1][];
     JNIErrorHandle.checkCall(
-            XGBoostJNI.XGBoosterDumpModel(handle, featureMap, statsFlag, modelInfos));
+            XGBoostJNI.XGBoosterDumpModelEx(handle, featureMap, statsFlag, format, modelInfos));
     return modelInfos[0];
   }
 
@@ -369,7 +397,8 @@ public class Booster implements Serializable, KryoSerializable {
       statsFlag = 1;
     }
     String[][] modelInfos = new String[1][];
-    JNIErrorHandle.checkCall(XGBoostJNI.XGBoosterDumpModel(handle, "", statsFlag, modelInfos));
+    JNIErrorHandle.checkCall(XGBoostJNI.XGBoosterDumpModelEx(handle, "", statsFlag, "text",
+            modelInfos));
     return modelInfos[0];
   }
 

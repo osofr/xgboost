@@ -4,6 +4,7 @@
 #include <xgboost/learner.h>
 #include <xgboost/c_api.h>
 #include <xgboost/logging.h>
+#include <dmlc/thread_local.h>
 #include <rabit/rabit.h>
 #include <cstdio>
 #include <vector>
@@ -13,7 +14,6 @@
 
 #include "./c_api_error.h"
 #include "../data/simple_csr_source.h"
-#include "../common/thread_local.h"
 #include "../common/math.h"
 #include "../common/io.h"
 #include "../common/group_data.h"
@@ -197,7 +197,7 @@ struct XGBAPIThreadLocalEntry {
 };
 
 // define the threadlocal store.
-typedef xgboost::common::ThreadLocalStore<XGBAPIThreadLocalEntry> XGBAPIThreadLocalStore;
+typedef dmlc::ThreadLocalStore<XGBAPIThreadLocalEntry> XGBAPIThreadLocalStore;
 
 int XGDMatrixCreateFromFile(const char *fname,
                             int silent,
@@ -238,22 +238,30 @@ XGB_DLL int XGDMatrixCreateFromCSREx(const size_t* indptr,
 
   API_BEGIN();
   data::SimpleCSRSource& mat = *source;
-  mat.row_ptr_.resize(nindptr);
-  for (size_t i = 0; i < nindptr; ++i) {
-    mat.row_ptr_[i] = indptr[i];
+  mat.row_ptr_.reserve(nindptr);
+  mat.row_data_.reserve(nelem);
+  mat.row_ptr_.resize(1);
+  mat.row_ptr_[0] = 0;
+  size_t num_column = 0;
+  for (size_t i = 1; i < nindptr; ++i) {
+    for (size_t j = indptr[i - 1]; j < indptr[i]; ++j) {
+      if (!common::CheckNAN(data[j])) {
+        // automatically skip nan.
+        mat.row_data_.emplace_back(RowBatch::Entry(indices[j], data[j]));
+        num_column = std::max(num_column, static_cast<size_t>(indices[j] + 1));
+      }
+    }
+    mat.row_ptr_.push_back(mat.row_data_.size());
   }
-  mat.row_data_.resize(nelem);
-  for (size_t i = 0; i < nelem; ++i) {
-    mat.row_data_[i] = RowBatch::Entry(indices[i], data[i]);
-    mat.info.num_col = std::max(mat.info.num_col,
-                                static_cast<uint64_t>(indices[i] + 1));
-  }
+
+  mat.info.num_col = num_column;
   if (num_col > 0) {
-    CHECK_LE(mat.info.num_col, num_col);
+    CHECK_LE(mat.info.num_col, num_col)
+        << "num_col=" << num_col << " vs " << mat.info.num_col;
     mat.info.num_col = num_col;
   }
   mat.info.num_row = nindptr - 1;
-  mat.info.num_nonzero = nelem;
+  mat.info.num_nonzero = mat.row_data_.size();
   *out = new std::shared_ptr<DMatrix>(DMatrix::Create(std::move(source)));
   API_END();
 }
@@ -291,7 +299,9 @@ XGB_DLL int XGDMatrixCreateFromCSCEx(const size_t* col_ptr,
   for (omp_ulong i = 0; i < static_cast<omp_ulong>(ncol); ++i) {  // NOLINT(*)
     int tid = omp_get_thread_num();
     for (size_t j = col_ptr[i]; j < col_ptr[i+1]; ++j) {
-      builder.AddBudget(indices[j], tid);
+      if (!common::CheckNAN(data[j])) {
+        builder.AddBudget(indices[j], tid);
+      }
     }
   }
   builder.InitStorage();
@@ -299,9 +309,11 @@ XGB_DLL int XGDMatrixCreateFromCSCEx(const size_t* col_ptr,
   for (omp_ulong i = 0; i < static_cast<omp_ulong>(ncol); ++i) {  // NOLINT(*)
     int tid = omp_get_thread_num();
     for (size_t j = col_ptr[i]; j < col_ptr[i+1]; ++j) {
-      builder.Push(indices[j],
-                   RowBatch::Entry(static_cast<bst_uint>(i), data[j]),
-                   tid);
+      if (!common::CheckNAN(data[j])) {
+        builder.Push(indices[j],
+                     RowBatch::Entry(static_cast<bst_uint>(i), data[j]),
+                     tid);
+      }
     }
   }
   mat.info.num_row = mat.row_ptr_.size() - 1;
@@ -372,7 +384,7 @@ XGB_DLL int XGDMatrixSliceDMatrix(DMatrixHandle handle,
   src.CopyFrom(static_cast<std::shared_ptr<DMatrix>*>(handle)->get());
   data::SimpleCSRSource& ret = *source;
 
-  CHECK_EQ(src.info.group_ptr.size(), 0)
+  CHECK_EQ(src.info.group_ptr.size(), 0U)
       << "slice does not support group structure";
 
   ret.Clear();
@@ -610,7 +622,8 @@ XGB_DLL int XGBoosterPredict(BoosterHandle handle,
       static_cast<std::shared_ptr<DMatrix>*>(dmat)->get(),
       (option_mask & 1) != 0,
       &preds, ntree_limit,
-      (option_mask & 2) != 0);
+      (option_mask & 2) != 0,
+      (option_mask & 4) != 0);
   *out_result = dmlc::BeginPtr(preds);
   *len = static_cast<xgboost::bst_ulong>(preds.size());
   API_END();

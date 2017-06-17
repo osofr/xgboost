@@ -18,12 +18,14 @@ package ml.dmlc.xgboost4j.scala.spark
 
 import scala.collection.mutable
 
-import ml.dmlc.xgboost4j.scala.spark.params.{BoosterParams, GeneralParams, LearningTaskParams}
+import ml.dmlc.xgboost4j.scala.spark.params._
+import org.json4s.DefaultFormats
+
 import org.apache.spark.ml.Predictor
 import org.apache.spark.ml.feature.LabeledPoint
 import org.apache.spark.ml.linalg.{Vector => MLVector}
 import org.apache.spark.ml.param._
-import org.apache.spark.ml.util.Identifiable
+import org.apache.spark.ml.util._
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types.DoubleType
 import org.apache.spark.sql.{Dataset, Row}
@@ -32,15 +34,14 @@ import org.apache.spark.sql.{Dataset, Row}
  * XGBoost Estimator to produce a XGBoost model
  */
 class XGBoostEstimator private[spark](
-  override val uid: String, private[spark] var xgboostParams: Map[String, Any])
+  override val uid: String, xgboostParams: Map[String, Any])
   extends Predictor[MLVector, XGBoostEstimator, XGBoostModel]
-  with LearningTaskParams with GeneralParams with BoosterParams {
+  with LearningTaskParams with GeneralParams with BoosterParams with MLWritable {
 
   def this(xgboostParams: Map[String, Any]) =
     this(Identifiable.randomUID("XGBoostEstimator"), xgboostParams: Map[String, Any])
 
   def this(uid: String) = this(uid, Map[String, Any]())
-
 
   // called in fromXGBParamMapToParams only when eval_metric is not defined
   private def setupDefaultEvalMetric(): String = {
@@ -93,17 +94,17 @@ class XGBoostEstimator private[spark](
 
   fromXGBParamMapToParams()
 
-  // only called when XGBParamMap is empty, i.e. in the constructor this(String)
-  // TODO: refactor to be functional
-  private def fromParamsToXGBParamMap(): Map[String, Any] = {
-    require(xgboostParams.isEmpty, "fromParamsToXGBParamMap can only be called when" +
-      " XGBParamMap is empty, i.e. in the constructor this(String)")
+  private[spark] def fromParamsToXGBParamMap: Map[String, Any] = {
     val xgbParamMap = new mutable.HashMap[String, Any]()
     for (param <- params) {
       xgbParamMap += param.name -> $(param)
     }
-    xgboostParams = xgbParamMap.toMap
-    xgbParamMap.toMap
+    val r = xgbParamMap.toMap
+    if (!XGBoost.isClassificationTask(r) || $(numClasses) == 2) {
+      r - "num_class"
+    } else {
+      r
+    }
   }
 
   /**
@@ -116,28 +117,52 @@ class XGBoostEstimator private[spark](
         LabeledPoint(label, feature)
     }
     transformSchema(trainingSet.schema, logging = true)
-    val trainedModel = XGBoost.trainWithRDD(instances, xgboostParams, $(round), $(nWorkers),
-      $(customObj), $(customEval), $(useExternalMemory), $(missing)).setParent(this)
-    val returnedModel = copyValues(trainedModel)
-    if (XGBoost.isClassificationTask(xgboostParams)) {
-      val numClass = {
-        if (xgboostParams.contains("num_class")) {
-          xgboostParams("num_class").asInstanceOf[Int]
-        } else {
-          2
-        }
-      }
-      returnedModel.asInstanceOf[XGBoostClassificationModel].numOfClasses = numClass
+    val derivedXGBoosterParamMap = fromParamsToXGBParamMap
+    val trainedModel = XGBoost.trainWithRDD(instances, derivedXGBoosterParamMap,
+      $(round), $(nWorkers), $(customObj), $(customEval), $(useExternalMemory),
+      $(missing)).setParent(this)
+    val returnedModel = copyValues(trainedModel, extractParamMap())
+    if (XGBoost.isClassificationTask(derivedXGBoosterParamMap)) {
+      returnedModel.asInstanceOf[XGBoostClassificationModel].numOfClasses = $(numClasses)
     }
     returnedModel
   }
 
   override def copy(extra: ParamMap): XGBoostEstimator = {
-    val est = defaultCopy(extra).asInstanceOf[XGBoostEstimator]
-    // we need to synchronize the params here instead of in the constructor
-    // because we cannot guarantee that params (default implementation) is initialized fully
-    // before the other params
-    est.fromParamsToXGBParamMap()
-    est
+    defaultCopy(extra).asInstanceOf[XGBoostEstimator]
+  }
+
+  override def write: MLWriter = new XGBoostEstimator.XGBoostEstimatorWriter(this)
+}
+
+object XGBoostEstimator extends MLReadable[XGBoostEstimator] {
+
+  override def read: MLReader[XGBoostEstimator] = new XGBoostEstimatorReader
+
+  override def load(path: String): XGBoostEstimator = super.load(path)
+
+  private[XGBoostEstimator] class XGBoostEstimatorWriter(instance: XGBoostEstimator)
+    extends MLWriter {
+    override protected def saveImpl(path: String): Unit = {
+      require(instance.fromParamsToXGBParamMap("custom_eval") == null &&
+        instance.fromParamsToXGBParamMap("custom_obj") == null,
+        "we do not support persist XGBoostEstimator with customized evaluator and objective" +
+          " function for now")
+      implicit val format = DefaultFormats
+      implicit val sc = super.sparkSession.sparkContext
+      DefaultXGBoostParamsWriter.saveMetadata(instance, path, sc)
+    }
+  }
+
+  private class XGBoostEstimatorReader extends MLReader[XGBoostEstimator] {
+
+    override def load(path: String): XGBoostEstimator = {
+      val metadata = DefaultXGBoostParamsReader.loadMetadata(path, sc)
+      val cls = Utils.classForName(metadata.className)
+      val instance =
+        cls.getConstructor(classOf[String]).newInstance(metadata.uid).asInstanceOf[Params]
+      DefaultXGBoostParamsReader.getAndSetParams(instance, metadata)
+      instance.asInstanceOf[XGBoostEstimator]
+    }
   }
 }

@@ -87,7 +87,7 @@ class RegLossObj : public ObjFunction {
                    const MetaInfo &info,
                    int iter,
                    std::vector<bst_gpair> *out_gpair) override {
-    CHECK_NE(info.labels.size(), 0) << "label set cannot be empty";
+    CHECK_NE(info.labels.size(), 0U) << "label set cannot be empty";
     CHECK_EQ(preds.size(), info.labels.size())
         << "labels are not correctly provided"
         << "preds.size=" << preds.size() << ", label.size=" << info.labels.size();
@@ -169,7 +169,7 @@ class PoissonRegression : public ObjFunction {
                    const MetaInfo &info,
                    int iter,
                    std::vector<bst_gpair> *out_gpair) override {
-    CHECK_NE(info.labels.size(), 0) << "label set cannot be empty";
+    CHECK_NE(info.labels.size(), 0U) << "label set cannot be empty";
     CHECK_EQ(preds.size(), info.labels.size()) << "labels are not correctly provided";
     out_gpair->resize(preds.size());
     // check if label in range
@@ -230,7 +230,7 @@ class GammaRegression : public ObjFunction {
                    const MetaInfo &info,
                    int iter,
                    std::vector<bst_gpair> *out_gpair) override {
-    CHECK_NE(info.labels.size(), 0) << "label set cannot be empty";
+    CHECK_NE(info.labels.size(), 0U) << "label set cannot be empty";
     CHECK_EQ(preds.size(), info.labels.size()) << "labels are not correctly provided";
     out_gpair->resize(preds.size());
     // check if label in range
@@ -295,7 +295,7 @@ class TweedieRegression : public ObjFunction {
                    const MetaInfo &info,
                    int iter,
                    std::vector<bst_gpair> *out_gpair) override {
-    CHECK_NE(info.labels.size(), 0) << "label set cannot be empty";
+    CHECK_NE(info.labels.size(), 0U) << "label set cannot be empty";
     CHECK_EQ(preds.size(), info.labels.size()) << "labels are not correctly provided";
     out_gpair->resize(preds.size());
     // check if label in range

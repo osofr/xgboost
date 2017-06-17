@@ -44,6 +44,8 @@ struct GBTreeTrainParam : public dmlc::Parameter<GBTreeTrainParam> {
   std::string updater_seq;
   /*! \brief type of boosting process to run */
   int process_type;
+  // flag to print out detailed breakdown of runtime
+  int debug_verbose;
   // declare parameters
   DMLC_DECLARE_PARAMETER(GBTreeTrainParam) {
     DMLC_DECLARE_FIELD(num_parallel_tree)
@@ -60,6 +62,10 @@ struct GBTreeTrainParam : public dmlc::Parameter<GBTreeTrainParam> {
         .add_enum("update", kUpdate)
         .describe("Whether to run the normal boosting process that creates new trees,"\
                   " or to update the trees in an existing model.");
+    DMLC_DECLARE_FIELD(debug_verbose)
+        .set_lower_bound(0)
+        .set_default(0)
+        .describe("flag to print out detailed breakdown of runtime");
     // add alias
     DMLC_DECLARE_ALIAS(updater_seq, updater);
   }
@@ -240,13 +246,13 @@ class GBTree : public GradientBooster {
                ObjFunction* obj) override {
     const std::vector<bst_gpair>& gpair = *in_gpair;
     std::vector<std::vector<std::unique_ptr<RegTree> > > new_trees;
-    if (mparam.num_output_group == 1) {
+    const int ngroup = mparam.num_output_group;
+    if (ngroup == 1) {
       std::vector<std::unique_ptr<RegTree> > ret;
       BoostNewTrees(gpair, p_fmat, 0, &ret);
       new_trees.push_back(std::move(ret));
     } else {
-      const int ngroup = mparam.num_output_group;
-      CHECK_EQ(gpair.size() % ngroup, 0)
+      CHECK_EQ(gpair.size() % ngroup, 0U)
           << "must have exactly ngroup*nrow gpairs";
       std::vector<bst_gpair> tmp(gpair.size() / ngroup);
       for (int gid = 0; gid < ngroup; ++gid) {
@@ -260,8 +266,12 @@ class GBTree : public GradientBooster {
         new_trees.push_back(std::move(ret));
       }
     }
-    for (int gid = 0; gid < mparam.num_output_group; ++gid) {
+    double tstart = dmlc::GetTime();
+    for (int gid = 0; gid < ngroup; ++gid) {
       this->CommitModel(std::move(new_trees[gid]), gid);
+    }
+    if (tparam.debug_verbose > 0) {
+      LOG(INFO) << "CommitModel(): " << dmlc::GetTime() - tstart << " sec";
     }
   }
 
@@ -310,6 +320,14 @@ class GBTree : public GradientBooster {
     const int nthread = omp_get_max_threads();
     InitThreadTemp(nthread);
     this->PredPath(p_fmat, out_preds, ntree_limit);
+  }
+
+  void PredictContribution(DMatrix* p_fmat,
+                           std::vector<bst_float>* out_contribs,
+                           unsigned ntree_limit) override {
+    const int nthread = omp_get_max_threads();
+    InitThreadTemp(nthread);
+    this->PredContrib(p_fmat, out_contribs, ntree_limit);
   }
 
   std::vector<std::string> DumpModel(const FeatureMap& fmap,
@@ -450,7 +468,8 @@ class GBTree : public GradientBooster {
       } else if (tparam.process_type == kUpdate) {
         CHECK_LT(trees.size(), trees_to_update.size());
         // move an existing tree from trees_to_update
-        auto t = std::move(trees_to_update[trees.size()]);
+        auto t = std::move(trees_to_update[trees.size() +
+                           bst_group * tparam.num_parallel_tree + i]);
         new_trees.push_back(t.get());
         ret->push_back(std::move(t));
       }
@@ -474,14 +493,20 @@ class GBTree : public GradientBooster {
     // update cache entry
     for (auto &kv : cache_) {
       CacheEntry& e = kv.second;
+
       if (e.predictions.size() == 0) {
         PredLoopInternal<GBTree>(
             e.data.get(), &(e.predictions),
             0, trees.size(), true);
       } else {
-        PredLoopInternal<GBTree>(
-            e.data.get(), &(e.predictions),
-            old_ntree, trees.size(), false);
+        if (mparam.num_output_group == 1 && updaters.size() > 0 && new_trees.size() == 1
+          && updaters.back()->UpdatePredictionCache(e.data.get(), &(e.predictions)) ) {
+          {}  // do nothing
+        } else {
+          PredLoopInternal<GBTree>(
+              e.data.get(), &(e.predictions),
+              old_ntree, trees.size(), false);
+        }
       }
     }
   }
@@ -534,6 +559,63 @@ class GBTree : public GradientBooster {
           preds[ridx * ntree_limit + j] = static_cast<bst_float>(tid);
         }
         feats.Drop(batch[i]);
+      }
+    }
+  }
+  // predict contributions
+  inline void PredContrib(DMatrix *p_fmat,
+                          std::vector<bst_float> *out_contribs,
+                          unsigned ntree_limit) {
+    const MetaInfo& info = p_fmat->info();
+    // number of valid trees
+    ntree_limit *= mparam.num_output_group;
+    if (ntree_limit == 0 || ntree_limit > trees.size()) {
+      ntree_limit = static_cast<unsigned>(trees.size());
+    }
+    const int ngroup = mparam.num_output_group;
+    size_t ncolumns = mparam.num_feature + 1;
+    // allocate space for (number of features + bias) times the number of rows
+    std::vector<bst_float>& contribs = *out_contribs;
+    contribs.resize(info.num_row * ncolumns * mparam.num_output_group);
+    // make sure contributions is zeroed, we could be reusing a previously allocated one
+    std::fill(contribs.begin(), contribs.end(), 0);
+    // initialize tree node mean values
+    #pragma omp parallel for schedule(static)
+    for (bst_omp_uint i=0; i < ntree_limit; ++i) {
+      trees[i]->FillNodeMeanValues();
+    }
+    // start collecting the contributions
+    dmlc::DataIter<RowBatch>* iter = p_fmat->RowIterator();
+    const std::vector<bst_float>& base_margin = info.base_margin;
+    iter->BeforeFirst();
+    while (iter->Next()) {
+      const RowBatch& batch = iter->Value();
+      // parallel over local batch
+      const bst_omp_uint nsize = static_cast<bst_omp_uint>(batch.size);
+      #pragma omp parallel for schedule(static)
+      for (bst_omp_uint i = 0; i < nsize; ++i) {
+        size_t row_idx = static_cast<size_t>(batch.base_rowid + i);
+        unsigned root_id = info.GetRoot(row_idx);
+        RegTree::FVec &feats = thread_temp[omp_get_thread_num()];
+        // loop over all classes
+        for (int gid = 0; gid < ngroup; ++gid) {
+          bst_float *p_contribs = &contribs[(row_idx * ngroup + gid) * ncolumns];
+          feats.Fill(batch[i]);
+          // calculate contributions
+          for (unsigned j = 0; j < ntree_limit; ++j) {
+            if (tree_info[j] != gid) {
+              continue;
+            }
+            trees[j]->CalculateContributions(feats, root_id, p_contribs);
+          }
+          feats.Drop(batch[i]);
+          // add base margin to BIAS
+          if (base_margin.size() != 0) {
+            p_contribs[ncolumns - 1] += base_margin[row_idx * ngroup + gid];
+          } else {
+            p_contribs[ncolumns - 1] += base_margin_;
+          }
+        }
       }
     }
   }
