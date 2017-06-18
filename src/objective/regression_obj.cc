@@ -32,7 +32,6 @@ struct LinearSquareLoss {
 struct LogisticRegression {
   static bst_float PredTransform(bst_float x) { return common::Sigmoid(x); }
   static bool CheckLabel(bst_float x) { return true; }
-  // static bool CheckLabel(bst_float x) { return x >= 0.0f && x <= 1.0f; }
   static bst_float FirstOrderGradient(bst_float predt, bst_float label) { return predt - label; }
   static bst_float SecondOrderGradient(bst_float predt, bst_float label) {
     const float eps = 1e-16f;

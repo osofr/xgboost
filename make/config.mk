@@ -17,8 +17,8 @@
 #----------------------------------------------------
 
 # choice of compiler, by default use system preference.
-# export CC = gcc
-# export CXX = g++
+export CC = gcc
+export CXX = g++
 # export MPICXX = mpicxx
 
 # the additional link flags you want to add
@@ -54,7 +54,7 @@ TEST_COVER = 0
 
 # path to gtest library (only used when $BUILD_TEST=1)
 # there should be an include path in $GTEST_PATH/include and library in $GTEST_PATH/lib
-GTEST_PATH ?= 
+GTEST_PATH ?=
 
 # path to cub library (only used when $CUDA_ENABLED=1)
 # this should point to the cub project root folder

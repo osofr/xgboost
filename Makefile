@@ -34,21 +34,11 @@ include $(XGB_PLUGINS)
 # set compiler defaults for OSX versus *nix
 # let people override either
 OS := $(shell uname)
-ifeq ($(OS), Darwin)
 ifndef CC
-export CC = $(if $(shell which clang), clang, gcc)
+export CC  = $(if $(shell which gcc-7),gcc-7,gcc)
 endif
 ifndef CXX
-export CXX = $(if $(shell which clang++), clang++, g++)
-endif
-else
-# linux defaults
-ifndef CC
-export CC = gcc
-endif
-ifndef CXX
-export CXX = g++
-endif
+export CXX = $(if $(shell which g++-7),g++-7,g++)
 endif
 
 export LDFLAGS= -pthread -lm $(ADD_LDFLAGS) $(DMLC_LDFLAGS) $(PLUGIN_LDFLAGS)
